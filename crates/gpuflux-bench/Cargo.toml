@@ -1,0 +1,9 @@
+[package]
+name = "gpuflux-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "GPUFlux Phase 0 A->X->B benchmark harness"
+
+[dependencies]
+gpuflux = { path = "../gpuflux" }

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting (rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Lints (clippy -D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --release -- -D warnings
+
+  test:
+    name: Build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: cargo test --release
+
+  # The C++/CUDA backend is excluded from the workspace and builds ONLY where
+  # nvcc exists. This job guards against accidentally dragging it into the
+  # default build on a CUDA-less runner.
+  cuda-crate-gate:
+    name: CUDA crate excluded from workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          # build.rs must not be executed on CI (no nvcc); verify exclusion works.
+          cargo metadata --no-deps --format-version 1 > /dev/null
+          grep -q 'crates/gpuflux-cuda' Cargo.toml && echo "gpuflux-cuda referenced (excluded) OK"
+          # gpuflux-cuda must NOT be a workspace member.
+          cargo metadata --no-deps --format-version 1 | grep -q 'gpuflux-cuda' && exit 1 || echo "gpuflux-cuda NOT a member OK"

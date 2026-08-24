@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/gpuflux", "crates/gpuflux-bench"]
+# The C++/CUDA backend is standalone: it requires the CUDA toolkit (nvcc) and
+# must not be part of the default workspace build. Build it separately on the
+# CUDA box: `cd crates/gpuflux-cuda && cargo build --release`.
+exclude = ["crates/gpuflux-cuda"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+libc = "0.2"
+redb = "2"

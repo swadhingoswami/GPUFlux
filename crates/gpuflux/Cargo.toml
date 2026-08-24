@@ -1,0 +1,15 @@
+[package]
+name = "gpuflux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Uncertainty-aware runtime decision engine for GPU data movement and recomputation"
+
+[dependencies]
+libc.workspace = true
+redb.workspace = true
+
+[features]
+default = []
+# Real CUDA backends. Only build on a machine with the CUDA toolkit present.
+cuda = []

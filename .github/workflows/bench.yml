@@ -1,0 +1,39 @@
+name: Benchmark report
+
+# Reproducible demo / benchmark artifact. Runs the end-to-end demo (simulated
+# GPU contention) plus one contention experiment and uploads the report.
+# Triggered manually, or on every push to main for a fresh artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Run benchmarks + upload report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Run demo (simulated GPU contention)
+        run: cargo run --release -p gpuflux-bench --bin demo -- --gpu-load=0.7 --iters=10 --prime=5 | tee /tmp/gpuflux-demo.txt
+      - name: Run Phase 4 contention experiment
+        run: cargo run --release -p gpuflux-bench --bin phase4 -- --policy=historical_cost --io-readers=3 --iters=15 --prime=10 | tee /tmp/gpuflux-phase4.txt
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpuflux-benchmark-report
+          path: |
+            /tmp/gpuflux-demo.txt
+            /tmp/gpuflux-phase4.txt
+          retention-days: 30

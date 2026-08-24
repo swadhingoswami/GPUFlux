@@ -1,0 +1,13 @@
+[package]
+name = "gpuflux-cuda"
+version = "0.1.0"
+edition = "2024"
+description = "C++/CUDA execution backend for GPUFlux - thin FFI layer (builds only on a CUDA machine)"
+build = "build.rs"
+
+# Standalone crate (not a workspace member): the root `cargo build` must not
+# depend on nvcc. Build it on the CUDA box:
+#   cd crates/gpuflux-cuda && cargo build --release
+
+[dependencies]
+gpuflux = { path = "../gpuflux" }
