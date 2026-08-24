@@ -411,6 +411,26 @@ with events, NVML telemetry.
 
 ---
 
+## Author
+
+**GPUFlux** is built and maintained by **Swadhin Goswami** ([@swadhingoswami](https://github.com/swadhingoswami)).
+
+Systems / runtime engineer with a background in C++ and Linux, storage, and
+systems programming — now focused on Rust + GPU systems, runtime decision
+engines, and performance engineering. GPUFlux is a research / portfolio project
+demonstrating uncertainty-aware runtime decisions end-to-end on real hardware.
+
+- GitHub: [github.com/swadhingoswami](https://github.com/swadhingoswami)
+- Project: [github.com/swadhingoswami/GPUFlux](https://github.com/swadhingoswami/GPUFlux)
+
+*(Add LinkedIn / Twitter / email links here.)*
+
+---
+
+## Keywords
+
+`#GPUFlux` `#GPU` `#GPUComputing` `#CUDA` `#NVIDIA` `#Rust` `#RustLang` `#SystemsProgramming` `#Runtime` `#GPUScheduling` `#GPUMemory` `#DataMovement` `#Recomputation` `#MachineLearning` `#DeepLearning` `#AI` `#HPC` `#HighPerformanceComputing` `#Storage` `#NVMe` `#PCIe` `#GPUDirectStorage` `#UncertaintyAware` `#OnlineLearning` `#Prediction` `#DeadlineAware` `#TailLatency` `#PerformanceEngineering` `#DistributedSystems` `#CloudComputing` `#OpenSource` `#Research` `#Benchmarking` `#Profiling` `#LLM` `#Inference` `#DataCenter` `#CPlusPlus` `#CPP` `#SystemsEngineer`
+
 <div align="center">
 
 **GPUFlux — Observe · Learn · Decide · Execute · Reassess · Improve**
