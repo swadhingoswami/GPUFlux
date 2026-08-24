@@ -9,7 +9,11 @@ completion time, estimate uncertainty, resource contention, and dependency deadl
 
 ---
 
-## Why this exists (30-second version)
+This README answers three questions, then shows the evidence.
+
+---
+
+## What is the problem?
 
 A GPU pipeline produces an intermediate object `X` that a later stage needs. When GPU
 memory is constrained, `X` must be obtained one of several ways:
@@ -29,7 +33,7 @@ GPU memory full
 Stage B needs X
 ```
 
-The naive rule is:
+The runtime has to choose **how to obtain `X`**. The naive rule is:
 
 ```text
 if move_time < recompute_time:
@@ -38,25 +42,139 @@ else:
     recompute()
 ```
 
-That rule assumes costs are fixed. They are not. NVMe, PCIe, CPU, GPU, and network
-contention change constantly, and so does the remaining time until stage B needs `X`.
+## Why is it difficult?
+
+That rule assumes costs are fixed. They are not.
+
+NVMe, PCIe, CPU, GPU, and network contention change constantly, and so does the remaining
+time until stage B needs `X`:
+
+```text
+today (t=0):                 5 ms later (t=5ms):
+  NVMe  → idle                 NVMe  → congested
+  GPU   → busy                 GPU   → available
+  CPU   → idle                 CPU   → busy
+  PCIe  → available            PCIe  → congested
+```
+
 A transfer that takes 20 ms when NVMe and PCIe are idle can take 50 ms under contention;
-a recomputation can be delayed by a busy GPU. **The correct decision changes with the
-system, and the runtime cannot know the future.**
+a recomputation can be delayed by a busy GPU.
 
-## The key insight
+The bottleneck is not *"how fast can we move 1 GB?"*. It is:
 
-GPUFlux does not try to predict one fixed cost per path. It tries to choose the path
-**most likely to complete before the dependent computation needs the data** — that is,
-it manages deadline risk under uncertainty.
+> **Which path is most likely to complete before the dependent computation needs the data?**
+
+The runtime observes the present but must decide for a future it cannot know. So the
+problem is one of **managing uncertainty**, not of eliminating it.
+
+## What does GPUFlux do differently?
+
+GPUFlux does not try to predict one fixed cost per path. It estimates each path's
+completion-time **distribution**, reasons about **deadline risk**, chooses an action,
+executes it, and feeds the measured result back into its own model.
 
 ```
    OBSERVE → HISTORY → PREDICT → ESTIMATE RISK → DECIDE → EXECUTE → MEASURE → LEARN
 ```
 
+### Decision model
+
+Intuition first: average latency is not enough. Two paths can have similar averages but
+very different tails, and near a deadline the tail is what matters. GPUFlux scores each
+candidate action `a` as
+
+```
+J(a) = E[T_a] + λ · P(T_a > D) + μ · U_a
+a*   = argmin_a J(a)
+```
+
+| term | meaning | where it comes from |
+|---|---|---|
+| `E[T_a]` | expected completion time | EWMA history, or an online-learned model |
+| `P(T_a > D)` | probability of missing the dependency deadline | log-normal fit through historical p50/p90 |
+| `U_a` | uncertainty of the estimate (p90 − p50) | historical spread |
+| `D` | remaining time until stage B needs X | dependency/deadline input |
+| `λ, μ` | tunable risk weights | policy configuration |
+
+### Prediction and learning
+
+The project evolved through five prediction levels, each motivated by a measurement:
+
+```text
+Level 0  Fixed            AlwaysMove / AlwaysRecompute
+Level 1  Current state    analytic cost model from live telemetry
+Level 2  History          EWMA mean/variance + p50/p90/p95 (history-as-primary)
+Level 3  Uncertainty      distribution → P(T>D) (log-normal fit), U = p90 − p50
+Level 4  Context-aware    online linear regression learns state → cost continuously
+```
+
+- **EWMA** adapts to drift: `mean_t = α·x_t + (1−α)·mean_{t−1}`.
+- **Quantiles** come from a bounded reservoir of recent samples.
+- **P(T>D)** is `1 − Φ((ln D − μ)/σ)` from a log-normal fit through p50/p90.
+- **Online regression** (recursive least squares with forgetting) learns, for example,
+  that recompute is insensitive to CPU pressure while move degrades with NVMe latency —
+  no hand-tuned coefficients.
+
+History lives in an embedded KV store (`redb`, not JSON): fast aggregates per
+`(action, object-size, state-regime)` bucket (sample count, EWMA mean/variance, bounded
+sample reservoir, deadline success rate) plus one `DecisionEvent` per decision
+(predicted costs, chosen action, actual cost, deadline result, prediction error,
+fallback, wasted time, regret). From Phase 4 onward, buckets are conditioned on a coarse
+state *regime* (`cpu-lo/hi`, `io-lo/hi`, `gpu-lo/hi`) so history collected under heavy
+contention does not pollute the low-contention estimate.
+
+**A negative result worth stating:** the crude Level-1 model initially performed *worse*
+than the static baseline. Having telemetry is not the same as having a correct model of
+how resources affect execution. That failure is what motivated the history and
+regression levels.
+
+### Architecture
+
+```text
+                       DecisionEngine (Rust)
+                            │  policy.choose(ctx, predictions)
+                     ┌──────▼────────┐
+                     │   Predictor    │  CurrentState · Historical · OnlineRegression
+                     └──────┬────────┘
+                            │
+              ┌─────────────▼──────────────┐
+              │   Current State + History   │  telemetry + redb observation store
+              └─────────────┬──────────────┘
+                            │
+       ┌────────────────────┼────────────────────┐
+       ▼                    ▼                    ▼
+  SimMoveExecutor     SimRecomputeExecutor   SimRemoteExecutor / CudaBackend
+  (real SSD I/O)      (timed CPU fill)      (remote CPU + network / C++/CUDA)
+```
+
+The important design boundary: **a `Policy` emits an `Action`; an executor implements it.**
+Prediction and decision logic never depend directly on CUDA or remote-execution details.
+That is what keeps the decision engine backend-agnostic — the same code runs against the
+SSD sim, the CPU fill, the simulated remote node, and the CUDA backend.
+
+The decision loop, per decision:
+
+```text
+ Engine          Predictor          Store (redb)          Executor
+   |  sample state  |                    |                    |
+   |--------------->|                    |                    |
+   |                | read history ----->|  aggregates per    |
+   |                |                    |  (action,size,regime)|
+   | predictions <--|  E, p50, p90, p95, |                    |
+   |                |  P(T>D)            |                    |
+   | policy.choose(ctx, pred)            |                    |
+   | Action::Move --------------------------->                |
+   |                |                    |   execute (chunked,
+   |                |                    |   checkpoints, abort)
+   | <---------------------------------------- actual, met, aborted
+   | record(actual) |------------------->|  EWMA/var, reservoir |
+   | predictor.update(action, state, actual)                  |
+   | next decision  |                    |                    |
+```
+
 ---
 
-## Results (measured)
+## Does it work? (measured)
 
 All numbers are from the development environment (Apple M3, 8 GB, Apple SSD, 256 MiB
 object; mean ± std over 3–4 repeats). These are experimental measurements, not
@@ -94,7 +212,7 @@ The same experiments show two negative results that matter: a naive state-aware 
 can be **worse than a static baseline**, and the deadline inversion is **real but
 hardware-sensitive**. Details in [Benchmark methodology](#benchmark-methodology).
 
-## One decision, two states
+### One decision, two states
 
 The same object, the same pipeline — only the resource state changes.
 
@@ -109,7 +227,7 @@ With a remote path enabled (Phase 8), a fast remote node becomes the choice when
 NVMe is contended and remote queue is low (`remote-load 0.1 → remote`), and the
 runtime abandons it as remote load rises (`0.5, 0.9 → move`).
 
-## Quick start
+### Quick start
 
 ```sh
 cargo test --release                                        # 23 unit tests
@@ -130,107 +248,6 @@ real measured cost, and whether the deadline was met:
 
 At `--gpu-load=0`, recompute wins (~135 ms); at `--gpu-load=0.7`, move wins (~157 ms).
 The decision engine does not change — only the observed state does.
-
----
-
-## Architecture
-
-```text
-                       DecisionEngine (Rust)
-                            │  policy.choose(ctx, predictions)
-                     ┌──────▼────────┐
-                     │   Predictor    │  CurrentState · Historical · OnlineRegression
-                     └──────┬────────┘
-                            │
-              ┌─────────────▼──────────────┐
-              │   Current State + History   │  telemetry + redb observation store
-              └─────────────┬──────────────┘
-                            │
-       ┌────────────────────┼────────────────────┐
-       ▼                    ▼                    ▼
-  SimMoveExecutor     SimRecomputeExecutor   SimRemoteExecutor / CudaBackend
-  (real SSD I/O)      (timed CPU fill)      (remote CPU + network / C++/CUDA)
-```
-
-The important design boundary: **a `Policy` emits an `Action`; an executor implements it.**
-Prediction and decision logic never depend directly on CUDA or remote-execution details.
-That is what keeps the decision engine backend-agnostic — the same code runs against the
-SSD sim, the CPU fill, the simulated remote node, and the CUDA backend.
-
----
-
-## Decision model
-
-Intuition first: average latency is not enough. Two paths can have similar averages but
-very different tails, and near a deadline the tail is what matters. GPUFlux scores each
-candidate action `a` as
-
-```
-J(a) = E[T_a] + λ · P(T_a > D) + μ · U_a
-a*   = argmin_a J(a)
-```
-
-| term | meaning | where it comes from |
-|---|---|---|
-| `E[T_a]` | expected completion time | EWMA history, or an online-learned model |
-| `P(T_a > D)` | probability of missing the dependency deadline | log-normal fit through historical p50/p90 |
-| `U_a` | uncertainty of the estimate (p90 − p50) | historical spread |
-| `D` | remaining time until stage B needs X | dependency/deadline input |
-| `λ, μ` | tunable risk weights | policy configuration (λ explored in the benchmark section) |
-
-The decision loop, per decision:
-
-```text
- Engine          Predictor          Store (redb)          Executor
-   |  sample state  |                    |                    |
-   |--------------->|                    |                    |
-   |                | read history ----->|  aggregates per    |
-   |                |                    |  (action,size,regime)|
-   | predictions <--|  E, p50, p90, p95, |                    |
-   |                |  P(T>D)            |                    |
-   | policy.choose(ctx, pred)            |                    |
-   | Action::Move --------------------------->                |
-   |                |                    |   execute (chunked,
-   |                |                    |   checkpoints, abort)
-   | <---------------------------------------- actual, met, aborted
-   | record(actual) |------------------->|  EWMA/var, reservoir |
-   | predictor.update(action, state, actual)                  |
-   | next decision  |                    |                    |
-```
-
----
-
-## Prediction and learning
-
-The project evolved through five prediction levels, each motivated by a measurement:
-
-```text
-Level 0  Fixed            AlwaysMove / AlwaysRecompute
-Level 1  Current state    analytic cost model from live telemetry
-Level 2  History          EWMA mean/variance + p50/p90/p95 (history-as-primary)
-Level 3  Uncertainty      distribution → P(T>D) (log-normal fit), U = p90 − p50
-Level 4  Context-aware    online linear regression learns state → cost continuously
-```
-
-- **EWMA** adapts to drift: `mean_t = α·x_t + (1−α)·mean_{t−1}`.
-- **Quantiles** come from a bounded reservoir of recent samples.
-- **P(T>D)** is `1 − Φ((ln D − μ)/σ)` from a log-normal fit through p50/p90.
-- **Online regression** (recursive least squares with forgetting) learns, for example,
-  that recompute is insensitive to CPU pressure while move degrades with NVMe latency —
-  no hand-tuned coefficients.
-
-History lives in an embedded KV store (`redb`, not JSON): fast aggregates per
-`(action, object-size, state-regime)` bucket (sample count, EWMA mean/variance, bounded
-sample reservoir, deadline success rate) plus one `DecisionEvent` per decision
-(predicted costs, chosen action, actual cost, deadline result, prediction error,
-fallback, wasted time, regret). From Phase 4 onward, buckets are conditioned on a coarse
-state *regime* (`cpu-lo/hi`, `io-lo/hi`, `gpu-lo/hi`) so history collected under heavy
-contention does not pollute the low-contention estimate.
-
-**A negative result worth stating:** the crude Level-1 model initially performed *worse*
-than the static baseline. Having telemetry is not the same as having a correct model of
-how resources affect execution. That failure is what motivated the history and
-regression levels.
 
 ---
 
@@ -264,7 +281,18 @@ path speed once a move is chosen; GPU memory managers use static eviction rules;
 activation recomputation is decided at graph-build time; job schedulers allocate
 resources rather than make per-object data-path decisions.
 
----
+## Benchmark methodology
+
+- **Environment**: Apple M3 (8 GB, Apple SSD, macOS). One workload point: 256 MiB
+  intermediate object, fill-pass recomputation.
+- **Repetitions**: headline claims are 3–4 repeats, reported as mean ± std.
+- **Contention**: induced CPU load (spinning cores) and IO load (F_NOCACHE reader
+  threads); simulated GPU load via a parameter that inflates recompute work by
+  `1/(1−gpu_load)` as real work, not a sleep.
+- **Metrics**: primary metric is deadline-meet rate; mean cost regret vs an oracle
+  (min over all measured paths) is reported alongside.
+- **Real vs simulated**: see the table above. No CUDA number here is real — the CUDA
+  backend has not been compiled or run.
 
 ## Implementation phases
 
@@ -282,21 +310,6 @@ engineering/research feedback loop.
 | 6 | replanning/fallback (checkpoints + abort) | predictions can be wrong mid-flight | meet 93.3±5.8% vs 21.7±20.2% |
 | 7 | online regression (RLS + residual quantiles) | learn, don't hand-tune | discovers recompute is flat, move tracks NVMe latency |
 | 8 | remote recompute path (3-way decision) | network + remote queue are real cost terms | local-only 694 ms → remote 182 ms |
-
-## Benchmark methodology
-
-- **Environment**: Apple M3 (8 GB, Apple SSD, macOS). One workload point: 256 MiB
-  intermediate object, fill-pass recomputation.
-- **Repetitions**: headline claims are 3–4 repeats, reported as mean ± std.
-- **Contention**: induced CPU load (spinning cores) and IO load (F_NOCACHE reader
-  threads); simulated GPU load via a parameter that inflates recompute work by
-  `1/(1−gpu_load)` as real work, not a sleep.
-- **Metrics**: primary metric is deadline-meet rate; mean cost regret vs an oracle
-  (min over all measured paths) is reported alongside.
-- **Real vs simulated**: see the table above. No CUDA number here is real — the CUDA
-  backend has not been compiled or run.
-
----
 
 ## Repository layout
 
@@ -333,8 +346,6 @@ cd crates/gpuflux-cuda && cargo build --release    # requires nvcc + NVIDIA GPU
 Implements the same executor/sampler traits over a plain C ABI (`cuda_backend.h`):
 `recompute_kernel`, `cudaMemcpyAsync` move on a stream timed with events, NVML
 telemetry. It is scaffolded but unvalidated until built on CUDA hardware.
-
----
 
 ## Limitations
 
