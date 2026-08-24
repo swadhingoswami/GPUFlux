@@ -1,11 +1,22 @@
-use std::io::Read;
-use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::path::PathBuf;
 
-use crate::executor::nocache::set_nocache;
 use crate::resource::ResourceState;
+
+// macOS-only telemetry (Mach CPU ticks, F_NOCACHE NVMe probe). On other
+// platforms the sampler reports an empty snapshot (CUDA/NVML supplies it on the
+// GPU box).
+#[cfg(target_os = "macos")]
+use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
+#[cfg(target_os = "macos")]
+use crate::executor::nocache::set_nocache;
 
 /// Samples a normalized `ResourceState`. The CUDA backend supplies its own
 /// sampler (NVML) on the GPU box; this module only knows `ResourceState`.
@@ -13,6 +24,7 @@ pub trait ResourceSampler {
     fn sample(&self) -> ResourceState;
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct CpuTicks {
     user: f64,
@@ -28,6 +40,7 @@ struct CpuTicks {
 /// PCIe fields stay `None`; the CUDA box adds them.
 pub struct SystemSampler {
     probe: PathBuf,
+    #[cfg(target_os = "macos")]
     prev: Mutex<Option<CpuTicks>>,
 }
 
@@ -35,6 +48,7 @@ impl SystemSampler {
     pub fn new(probe: PathBuf) -> Self {
         Self {
             probe,
+            #[cfg(target_os = "macos")]
             prev: Mutex::new(None),
         }
     }
@@ -68,6 +82,7 @@ fn read_cpu_ticks() -> Option<CpuTicks> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn sample_cpu_util(prev: &Mutex<Option<CpuTicks>>) -> Option<f64> {
     let ticks = read_cpu_ticks()?;
     let mut guard = prev.lock().unwrap();
@@ -90,6 +105,7 @@ fn sample_cpu_util(prev: &Mutex<Option<CpuTicks>>) -> Option<f64> {
     util
 }
 
+#[cfg(target_os = "macos")]
 fn sample_nvme_latency_us(path: &Path) -> Option<f64> {
     let mut f = std::fs::File::open(path).ok()?;
     let _ = set_nocache(f.as_raw_fd());
