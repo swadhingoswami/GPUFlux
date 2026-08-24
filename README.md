@@ -1,3 +1,5 @@
+<img width="1408" height="768" alt="image" src="https://github.com/user-attachments/assets/31f87318-70e2-4c6c-a64e-72b48c88a89b" />
+
 # GPUFlux
 
 **Adaptive runtime for GPU data movement, recomputation, and remote execution**
@@ -129,6 +131,9 @@ how resources affect execution. That failure is what motivated the history and
 regression levels.
 
 ### Architecture
+
+<img width="1376" height="768" alt="image" src="https://github.com/user-attachments/assets/d23d358c-6a09-4ea6-ba06-05ef693645ba" />
+
 
 ```text
                        DecisionEngine (Rust)
