@@ -6,6 +6,8 @@ use crate::resource::ResourceState;
 // platforms the sampler reports an empty snapshot (CUDA/NVML supplies it on the
 // GPU box).
 #[cfg(target_os = "macos")]
+use crate::executor::nocache::set_nocache;
+#[cfg(target_os = "macos")]
 use std::io::Read;
 #[cfg(target_os = "macos")]
 use std::os::unix::io::AsRawFd;
@@ -15,8 +17,6 @@ use std::path::Path;
 use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
-#[cfg(target_os = "macos")]
-use crate::executor::nocache::set_nocache;
 
 /// Samples a normalized `ResourceState`. The CUDA backend supplies its own
 /// sampler (NVML) on the GPU box; this module only knows `ResourceState`.
